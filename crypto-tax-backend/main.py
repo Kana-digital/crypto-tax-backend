@@ -1,5 +1,6 @@
 import shutil
 import tempfile
+import os
 import io
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from typing import List
@@ -149,7 +150,11 @@ async def calculate(
         try:
             trades = parse_trades(tmp_path)
         except ValueError as e:
+            os.unlink(tmp_path)
             raise HTTPException(status_code=422, detail=f"{file.filename}：{str(e)}")
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
         if trades is None:
             raise HTTPException(status_code=422, detail=f"{file.filename}：対応している取引所のCSVとして認識できませんでした。")
         all_trades.extend(trades)
@@ -183,7 +188,11 @@ async def calculate_pdf(
         try:
             trades = parse_trades(tmp_path)
         except ValueError as e:
+            os.unlink(tmp_path)
             raise HTTPException(status_code=422, detail=f"{file.filename}：{str(e)}")
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
         if trades is None:
             raise HTTPException(status_code=422, detail=f"{file.filename}：対応している取引所のCSVとして認識できませんでした。")
         all_trades.extend(trades)
