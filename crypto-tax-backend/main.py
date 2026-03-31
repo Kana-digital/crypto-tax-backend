@@ -2,7 +2,9 @@ import shutil
 import tempfile
 import os
 import io
+from anthropic import Anthropic
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from pydantic import BaseModel
 from typing import List
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
@@ -17,6 +19,26 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 
 app = FastAPI()
+
+anthropic_client = Anthropic()  # ANTHROPIC_API_KEY 環境変数を自動参照
+
+CHAT_SYSTEM_PROMPT = """あなたは「暗号資産損益計算ツール」のサポートAIです。
+ユーザーからの質問・不具合報告に丁寧かつ簡潔に日本語で答えてください。
+
+【ツールの概要】
+- Coincheck・SBI VC Trade・bitbank の取引履歴CSVをアップロードすると損益を計算するWebツールです
+- 計算方法は「総平均法」と「移動平均法」に対応しています
+- 計算結果はPDFでもダウンロードできます
+- 無料で利用できます
+
+【よくある質問と回答】
+- 対応取引所: Coincheck・SBI VC Trade・bitbank のみです
+- CSVの取得方法: 各取引所のマイページ→取引履歴→CSV出力からダウンロードできます
+- 計算結果はあくまで参考値であり、確定申告には税理士への相談を推奨します
+- アップロードしたCSVはサーバーに保存されず、計算後即座に削除されます
+
+不具合の報告を受けた場合は、「ご報告ありがとうございます。開発者に共有し改善いたします」と伝えてください。
+回答は3〜5文程度でコンパクトにまとめてください。"""
 
 app.add_middleware(
     CORSMiddleware,
@@ -213,3 +235,25 @@ async def calculate_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": "attachment; filename=crypto_tax_report.pdf"},
     )
+
+
+# ==================== Chat Support ====================
+class ChatMessage(BaseModel):
+    role: str  # "user" or "assistant"
+    content: str
+
+class ChatRequest(BaseModel):
+    messages: List[ChatMessage]
+
+@app.post("/chat")
+async def chat(request: ChatRequest):
+    try:
+        response = anthropic_client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=1024,
+            system=CHAT_SYSTEM_PROMPT,
+            messages=[{"role": m.role, "content": m.content} for m in request.messages],
+        )
+        return {"reply": response.content[0].text}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="AIサポートへの接続に失敗しました。しばらく待ってから再度お試しください。")
