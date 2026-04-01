@@ -17,10 +17,16 @@ from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, 
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+from supabase import create_client, Client
 
 app = FastAPI()
 
 anthropic_client = Anthropic()  # ANTHROPIC_API_KEY 環境変数を自動参照
+
+# Supabase クライアント
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
+SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY) if SUPABASE_URL and SUPABASE_ANON_KEY else None
 
 CHAT_SYSTEM_PROMPT = """あなたは「暗号資産損益計算ツール」のサポートAIです。
 ユーザーからの質問・不具合報告に丁寧かつ簡潔に日本語で答えてください。
@@ -257,3 +263,54 @@ async def chat(request: ChatRequest):
         return {"reply": response.content[0].text}
     except Exception as e:
         raise HTTPException(status_code=500, detail="AIサポートへの接続に失敗しました。しばらく待ってから再度お試しください。")
+
+
+# ==================== Exchange Requests ====================
+class ExchangeRequestBody(BaseModel):
+    exchange_name: str
+    email: str
+
+@app.post("/request-exchange")
+async def request_exchange(body: ExchangeRequestBody):
+    if not supabase:
+        raise HTTPException(status_code=503, detail="データベースに接続できません。")
+    exchange_name = body.exchange_name.strip()
+    email = body.email.strip().lower()
+    if not exchange_name or not email:
+        raise HTTPException(status_code=422, detail="取引所名とメールアドレスを入力してください。")
+    try:
+        # upsert: 同じ (exchange_name, email) は無視
+        supabase.table("exchange_requests").upsert(
+            {"exchange_name": exchange_name, "email": email},
+            on_conflict="exchange_name,email"
+        ).execute()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="リクエストの保存に失敗しました。")
+
+    # 同取引所のリクエスト数を返す
+    count_res = supabase.table("exchange_requests").select("id", count="exact").eq("exchange_name", exchange_name).execute()
+    count = count_res.count if count_res.count is not None else 0
+    return {"exchange_name": exchange_name, "count": count, "is_official": count >= 3}
+
+
+@app.get("/exchange-requests")
+async def get_exchange_requests():
+    if not supabase:
+        raise HTTPException(status_code=503, detail="データベースに接続できません。")
+    try:
+        res = supabase.table("exchange_requests").select("exchange_name").execute()
+        rows = res.data or []
+    except Exception as e:
+        raise HTTPException(status_code=500, detail="データの取得に失敗しました。")
+
+    # 取引所ごとにカウント集計
+    counts: dict = {}
+    for row in rows:
+        name = row["exchange_name"]
+        counts[name] = counts.get(name, 0) + 1
+
+    result = [
+        {"exchange_name": name, "count": cnt, "is_official": cnt >= 3}
+        for name, cnt in sorted(counts.items(), key=lambda x: -x[1])
+    ]
+    return {"exchanges": result}
