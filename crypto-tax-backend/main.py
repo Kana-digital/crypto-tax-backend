@@ -18,6 +18,8 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from supabase import create_client, Client
+import stripe
+from fastapi import Request
 
 app = FastAPI()
 
@@ -27,6 +29,12 @@ anthropic_client = Anthropic()  # ANTHROPIC_API_KEY 環境変数を自動参照
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY) if SUPABASE_URL and SUPABASE_ANON_KEY else None
+
+# Stripe 設定
+stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
+STRIPE_PRICE_ID = os.environ.get("STRIPE_PRICE_ID", "")
+STRIPE_WEBHOOK_SECRET = os.environ.get("STRIPE_WEBHOOK_SECRET", "")
+FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://crypto-tax-frontend.vercel.app")
 
 CHAT_SYSTEM_PROMPT = """あなたは「暗号資産損益計算ツール」のサポートAIです。
 ユーザーからの質問・不具合報告に丁寧かつ簡潔に日本語で答えてください。
@@ -334,3 +342,72 @@ async def get_exchange_requests():
         for name, cnt in sorted(counts.items(), key=lambda x: -x[1])
     ]
     return {"exchanges": result}
+
+
+# ==================== Stripe 決済 ====================
+
+class CheckoutRequest(BaseModel):
+    user_id: str
+    email: str
+
+@app.post("/create-checkout-session")
+async def create_checkout_session(req: CheckoutRequest):
+    if not stripe.api_key or not STRIPE_PRICE_ID:
+        raise HTTPException(status_code=503, detail="決済機能が設定されていません。")
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
+            mode="subscription",
+            customer_email=req.email,
+            client_reference_id=req.user_id,
+            success_url=f"{FRONTEND_URL}?payment=success",
+            cancel_url=f"{FRONTEND_URL}?payment=cancel",
+        )
+        return {"checkout_url": session.url}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"決済セッションの作成に失敗しました: {str(e)}")
+
+
+@app.post("/stripe-webhook")
+async def stripe_webhook(request: Request):
+    payload = await request.body()
+    sig_header = request.headers.get("stripe-signature", "")
+
+    try:
+        event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
+    except stripe.error.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="無効な署名です。")
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    if event["type"] == "checkout.session.completed":
+        session = event["data"]["object"]
+        user_id = session.get("client_reference_id")
+        if user_id and supabase:
+            from datetime import datetime, timedelta, timezone
+            paid_until = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
+            supabase.table("user_profiles").upsert({
+                "id": user_id,
+                "is_paid": True,
+                "paid_until": paid_until,
+            }).execute()
+
+    elif event["type"] in ("customer.subscription.deleted", "customer.subscription.paused"):
+        subscription = event["data"]["object"]
+        # customer IDからユーザーを特定してis_paidをfalseに
+        customer_id = subscription.get("customer")
+        if customer_id and supabase:
+            try:
+                customer = stripe.Customer.retrieve(customer_id)
+                # client_reference_idはCheckout Sessionにあるので、metadataで対応
+                # ここでは簡易的にemailで検索
+                email = customer.get("email")
+                if email:
+                    # auth.usersからemailでuser_idを取得する処理は省略
+                    # 将来的にstripe customer idをuser_profilesに保存して対応
+                    pass
+            except Exception:
+                pass
+
+    return {"received": True}
