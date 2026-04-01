@@ -361,6 +361,7 @@ async def create_checkout_session(req: CheckoutRequest):
             mode="subscription",
             customer_email=req.email,
             client_reference_id=req.user_id,
+            billing_address_collection="required",
             success_url=f"{FRONTEND_URL}?payment=success",
             cancel_url=f"{FRONTEND_URL}?payment=cancel",
         )
