@@ -266,28 +266,48 @@ async def chat(request: ChatRequest):
 
 
 # ==================== Exchange Requests ====================
-class ExchangeRequestBody(BaseModel):
-    exchange_name: str
-    email: str
-
 @app.post("/request-exchange")
-async def request_exchange(body: ExchangeRequestBody):
+async def request_exchange(
+    exchange_name: str = Form(...),
+    email: str = Form(...),
+    csv_file: UploadFile = File(None),  # 任意
+):
     if not supabase:
         raise HTTPException(status_code=503, detail="データベースに接続できません。")
-    exchange_name = body.exchange_name.strip()
-    email = body.email.strip().lower()
+    exchange_name = exchange_name.strip()
+    email = email.strip().lower()
     if not exchange_name or not email:
         raise HTTPException(status_code=422, detail="取引所名とメールアドレスを入力してください。")
+
+    # CSV を Supabase Storage にアップロード（任意）
+    csv_path = None
+    if csv_file and csv_file.filename:
+        if not csv_file.filename.endswith(".csv"):
+            raise HTTPException(status_code=422, detail="CSVファイルのみアップロードできます。")
+        contents = await csv_file.read()
+        if len(contents) > 5 * 1024 * 1024:
+            raise HTTPException(status_code=422, detail="ファイルサイズは5MB以下にしてください。")
+        import uuid, re
+        safe_name = re.sub(r"[^\w.-]", "_", exchange_name)
+        storage_path = f"{safe_name}/{uuid.uuid4()}.csv"
+        try:
+            supabase.storage.from_("exchange-csvs").upload(
+                path=storage_path,
+                file=contents,
+                file_options={"content-type": "text/csv"},
+            )
+            csv_path = storage_path
+        except Exception:
+            pass  # CSV保存失敗はリクエスト自体を妨げない
+
     try:
-        # upsert: 同じ (exchange_name, email) は無視
         supabase.table("exchange_requests").upsert(
-            {"exchange_name": exchange_name, "email": email},
+            {"exchange_name": exchange_name, "email": email, "csv_path": csv_path},
             on_conflict="exchange_name,email"
         ).execute()
-    except Exception as e:
+    except Exception:
         raise HTTPException(status_code=500, detail="リクエストの保存に失敗しました。")
 
-    # 同取引所のリクエスト数を返す
     count_res = supabase.table("exchange_requests").select("id", count="exact").eq("exchange_name", exchange_name).execute()
     count = count_res.count if count_res.count is not None else 0
     return {"exchange_name": exchange_name, "count": count, "is_official": count >= 3}
