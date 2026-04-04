@@ -3,11 +3,12 @@ import tempfile
 import os
 import io
 from anthropic import Anthropic
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from auth import get_current_user, get_optional_user, AuthUser
 from parsers import coincheck, sbivc, bitbank, exported
 from calculators import total_average, moving_average
 from reportlab.lib.pagesizes import A4
@@ -173,6 +174,22 @@ def read_root():
     return {"message": "crypto-tax-backend 起動中！"}
 
 
+# ==================== Auth ====================
+@app.get("/me")
+async def get_me(user: AuthUser = Depends(get_current_user)):
+    """認証必須: 現在のユーザー情報を返す"""
+    result = {"id": user.id, "email": user.email, "role": user.role}
+    if supabase:
+        try:
+            profile = supabase.table("user_profiles").select("is_paid,paid_until").eq("id", user.id).single().execute()
+            if profile.data:
+                result["is_paid"] = profile.data.get("is_paid", False)
+                result["paid_until"] = profile.data.get("paid_until")
+        except Exception:
+            result["is_paid"] = False
+    return result
+
+
 @app.post("/calculate")
 async def calculate(
     files: List[UploadFile] = File(...),
@@ -277,13 +294,16 @@ async def chat(request: ChatRequest):
 @app.post("/request-exchange")
 async def request_exchange(
     exchange_name: str = Form(...),
-    email: str = Form(...),
+    email: str = Form(""),
     csv_file: UploadFile = File(None),  # 任意
+    user: Optional[AuthUser] = Depends(get_optional_user),
 ):
+    """認証任意: ログイン済みならJWTからメール取得、未ログインならフォーム入力"""
     if not supabase:
         raise HTTPException(status_code=503, detail="データベースに接続できません。")
     exchange_name = exchange_name.strip()
-    email = email.strip().lower()
+    # 認証済みユーザーのメールを優先使用
+    email = (user.email if user and user.email else email).strip().lower()
     if not exchange_name or not email:
         raise HTTPException(status_code=422, detail="取引所名とメールアドレスを入力してください。")
 
@@ -346,21 +366,20 @@ async def get_exchange_requests():
 
 # ==================== Stripe 決済 ====================
 
-class CheckoutRequest(BaseModel):
-    user_id: str
-    email: str
-
 @app.post("/create-checkout-session")
-async def create_checkout_session(req: CheckoutRequest):
+async def create_checkout_session(user: AuthUser = Depends(get_current_user)):
+    """認証必須: JWTからユーザーIDとメールを取得して決済セッションを作成"""
     if not stripe.api_key or not STRIPE_PRICE_ID:
         raise HTTPException(status_code=503, detail="決済機能が設定されていません。")
+    if not user.email:
+        raise HTTPException(status_code=422, detail="メールアドレスが取得できません。プロフィールを確認してください。")
     try:
         session = stripe.checkout.Session.create(
             payment_method_types=["card"],
             line_items=[{"price": STRIPE_PRICE_ID, "quantity": 1}],
             mode="subscription",
-            customer_email=req.email,
-            client_reference_id=req.user_id,
+            customer_email=user.email,
+            client_reference_id=user.id,
             billing_address_collection="required",
             success_url=f"{FRONTEND_URL}?payment=success",
             cancel_url=f"{FRONTEND_URL}?payment=cancel",
