@@ -9,7 +9,7 @@ from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from auth import get_current_user, get_optional_user, AuthUser
-from parsers import coincheck, sbivc, bitbank, exported
+from parsers import coincheck, sbivc, bitbank, binance, exported
 from calculators import total_average, moving_average
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -70,7 +70,7 @@ FONT_NAME = "HeiseiKakuGo-W5"
 def auto_detect_and_parse(tmp_path: str):
     """CSVの列名を見て取引所を自動判別してパースする"""
     errors = []
-    for parser in [exported, coincheck, sbivc, bitbank]:
+    for parser in [exported, coincheck, sbivc, bitbank, binance]:
         try:
             return parser.parse(tmp_path)
         except ValueError as e:
