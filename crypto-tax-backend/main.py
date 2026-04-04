@@ -372,43 +372,62 @@ async def create_checkout_session(req: CheckoutRequest):
 
 @app.post("/stripe-webhook")
 async def stripe_webhook(request: Request):
+    if not STRIPE_WEBHOOK_SECRET:
+        raise HTTPException(status_code=503, detail="Webhook署名シークレットが設定されていません。")
+
     payload = await request.body()
     sig_header = request.headers.get("stripe-signature", "")
 
+    if not sig_header:
+        raise HTTPException(status_code=400, detail="stripe-signatureヘッダーがありません。")
+
     try:
         event = stripe.Webhook.construct_event(payload, sig_header, STRIPE_WEBHOOK_SECRET)
-    except stripe.error.SignatureVerificationError:
+    except stripe.SignatureVerificationError:
         raise HTTPException(status_code=400, detail="無効な署名です。")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="ペイロードが不正です。")
     except Exception as e:
-        raise HTTPException(status_code=400, detail=str(e))
+        raise HTTPException(status_code=400, detail=f"Webhook検証エラー: {str(e)}")
 
-    if event["type"] == "checkout.session.completed":
+    event_type = event["type"]
+
+    if event_type == "checkout.session.completed":
         session = event["data"]["object"]
         user_id = session.get("client_reference_id")
+        customer_id = session.get("customer")
         if user_id and supabase:
             from datetime import datetime, timedelta, timezone
             paid_until = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
-            supabase.table("user_profiles").upsert({
+            upsert_data = {
                 "id": user_id,
                 "is_paid": True,
                 "paid_until": paid_until,
-            }).execute()
+            }
+            # Stripe customer IDを保存（解約時の照合用）
+            if customer_id:
+                upsert_data["stripe_customer_id"] = customer_id
+            supabase.table("user_profiles").upsert(upsert_data).execute()
 
-    elif event["type"] in ("customer.subscription.deleted", "customer.subscription.paused"):
+    elif event_type in ("customer.subscription.deleted", "customer.subscription.paused"):
         subscription = event["data"]["object"]
-        # customer IDからユーザーを特定してis_paidをfalseに
         customer_id = subscription.get("customer")
         if customer_id and supabase:
             try:
-                customer = stripe.Customer.retrieve(customer_id)
-                # client_reference_idはCheckout Sessionにあるので、metadataで対応
-                # ここでは簡易的にemailで検索
-                email = customer.get("email")
-                if email:
-                    # auth.usersからemailでuser_idを取得する処理は省略
-                    # 将来的にstripe customer idをuser_profilesに保存して対応
-                    pass
+                # stripe_customer_idで直接ユーザーを検索
+                res = supabase.table("user_profiles").select("id").eq(
+                    "stripe_customer_id", customer_id
+                ).execute()
+                if res.data:
+                    user_id = res.data[0]["id"]
+                    supabase.table("user_profiles").update({
+                        "is_paid": False,
+                    }).eq("id", user_id).execute()
             except Exception:
-                pass
+                pass  # ログ出力推奨（将来的にlogging追加）
+
+    elif event_type == "invoice.payment_failed":
+        # 支払い失敗の処理（将来的にメール通知追加）
+        pass
 
     return {"received": True}
