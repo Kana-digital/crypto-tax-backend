@@ -7,3 +7,4 @@ anthropic
 supabase
 stripe
 PyJWT>=2.0
+httpx

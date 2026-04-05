@@ -8,8 +8,11 @@ from pydantic import BaseModel
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
+from fastapi.responses import HTMLResponse
 from auth import get_current_user, get_optional_user, AuthUser
 from parsers import coincheck, sbivc, bitbank, binance, exported
+from email_service import send_email
+from email_templates import welcome_email, upgrade_email, payment_success_email, SUPABASE_CONFIRM_TEMPLATE
 from calculators import total_average, moving_average
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -43,14 +46,18 @@ CHAT_SYSTEM_PROMPT = """あなたは「暗号資産損益計算ツール」の�
 【ツールの概要】
 - Coincheck・SBI VC Trade・bitbank の取引履歴CSVをアップロードすると損益を計算するWebツールです
 - 計算方法は「総平均法」と「移動平均法」に対応しています
-- 計算結果はPDFでもダウンロードできます
-- 無料で利用できます
+
+【料金プラン】
+- 無料プラン: CSV取り込みによる損益計算が利用可能。CSV取り込み時に広告が表示されます。
+- プレミアムプラン（年間980円）: 広告なし＋取引履歴のPDF出力が可能になります。
 
 【よくある質問と回答】
 - 対応取引所: Coincheck・SBI VC Trade・bitbank のみです
 - CSVの取得方法: 各取引所のマイページ→取引履歴→CSV出力からダウンロードできます
 - 計算結果はあくまで参考値であり、確定申告には税理士への相談を推奨します
 - アップロードしたCSVはサーバーに保存されず、計算後即座に削除されます
+- PDF出力はプレミアムプラン限定の機能です
+- プレミアムプランへのアップグレードは設定画面から行えます
 
 不具合の報告を受けた場合は、「ご報告ありがとうございます。開発者に共有し改善いたします」と伝えてください。
 回答は3〜5文程度でコンパクトにまとめてください。"""
@@ -190,10 +197,29 @@ async def get_me(user: AuthUser = Depends(get_current_user)):
     return result
 
 
+def _is_user_paid(user: Optional[AuthUser]) -> bool:
+    """ユーザーが有料プランかどうかを判定する"""
+    if not user or not supabase:
+        return False
+    try:
+        from datetime import datetime, timezone
+        profile = supabase.table("user_profiles").select("is_paid,paid_until").eq("id", user.id).single().execute()
+        if profile.data and profile.data.get("is_paid"):
+            paid_until = profile.data.get("paid_until")
+            if paid_until:
+                expiry = datetime.fromisoformat(paid_until.replace("Z", "+00:00"))
+                return expiry > datetime.now(timezone.utc)
+            return True
+        return False
+    except Exception:
+        return False
+
+
 @app.post("/calculate")
 async def calculate(
     files: List[UploadFile] = File(...),
     method: str = Form(...),
+    user: Optional[AuthUser] = Depends(get_optional_user),
 ):
     all_trades = []
     for file in files:
@@ -221,10 +247,15 @@ async def calculate(
 
     total_profit = sum(r["profit"] for r in results)
 
+    # 無料ユーザーにはCSV取り込み後に広告を表示
+    is_paid = _is_user_paid(user)
+
     return {
         "total_profit": total_profit,
         "trades": results,
         "raw_trades": all_trades,
+        "show_ad": not is_paid,
+        "is_paid": is_paid,
     }
 
 
@@ -232,7 +263,15 @@ async def calculate(
 async def calculate_pdf(
     files: List[UploadFile] = File(...),
     method: str = Form(...),
+    user: AuthUser = Depends(get_current_user),
 ):
+    # 有料プランのユーザーのみPDF出力可能
+    if not _is_user_paid(user):
+        raise HTTPException(
+            status_code=403,
+            detail="PDF出力は有料プラン（年間980円）の機能です。アップグレードしてご利用ください。"
+        )
+
     all_trades = []
     for file in files:
         with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
@@ -364,6 +403,47 @@ async def get_exchange_requests():
     return {"exchanges": result}
 
 
+# ==================== プラン情報 ====================
+
+@app.get("/plans")
+async def get_plans():
+    """料金プラン情報を返す（認証不要）"""
+    return {
+        "plans": [
+            {
+                "id": "free",
+                "name": "無料プラン",
+                "price": 0,
+                "interval": None,
+                "features": [
+                    "CSV取り込みによる損益計算",
+                    "総平均法・移動平均法に対応",
+                    "AIサポートチャット",
+                ],
+                "limitations": [
+                    "CSV取り込み時に広告が表示されます",
+                    "PDF出力は利用できません",
+                ],
+            },
+            {
+                "id": "premium",
+                "name": "プレミアムプラン",
+                "price": 980,
+                "currency": "jpy",
+                "interval": "year",
+                "features": [
+                    "CSV取り込みによる損益計算",
+                    "総平均法・移動平均法に対応",
+                    "AIサポートチャット",
+                    "広告なし",
+                    "取引履歴PDF出力",
+                ],
+                "limitations": [],
+            },
+        ]
+    }
+
+
 # ==================== Stripe 決済 ====================
 
 @app.post("/create-checkout-session")
@@ -415,6 +495,7 @@ async def stripe_webhook(request: Request):
         session = event["data"]["object"]
         user_id = session.get("client_reference_id")
         customer_id = session.get("customer")
+        customer_email = session.get("customer_email") or session.get("customer_details", {}).get("email")
         if user_id and supabase:
             from datetime import datetime, timedelta, timezone
             paid_until = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
@@ -427,6 +508,15 @@ async def stripe_webhook(request: Request):
             if customer_id:
                 upsert_data["stripe_customer_id"] = customer_id
             supabase.table("user_profiles").upsert(upsert_data).execute()
+
+            # 決済完了メールを送信
+            if customer_email:
+                try:
+                    subject, html = payment_success_email(customer_email)
+                    import asyncio
+                    asyncio.ensure_future(send_email(customer_email, subject, html))
+                except Exception:
+                    pass  # メール送信失敗は決済処理をブロックしない
 
     elif event_type in ("customer.subscription.deleted", "customer.subscription.paused"):
         subscription = event["data"]["object"]
@@ -450,3 +540,50 @@ async def stripe_webhook(request: Request):
         pass
 
     return {"received": True}
+
+
+# ==================== メールテスト ====================
+
+class TestEmailRequest(BaseModel):
+    email: str
+    type: str  # "welcome" | "upgrade" | "payment_success"
+
+@app.post("/test-email/send")
+async def test_email_send(req: TestEmailRequest):
+    """テスト用：指定したメールアドレスにテストメールを送信する"""
+    templates = {
+        "welcome": welcome_email,
+        "upgrade": upgrade_email,
+        "payment_success": payment_success_email,
+    }
+    if req.type not in templates:
+        raise HTTPException(
+            status_code=422,
+            detail=f"typeは {', '.join(templates.keys())} のいずれかを指定してください。"
+        )
+    subject, html = templates[req.type](req.email)
+    try:
+        result = await send_email(req.email, subject, html)
+        return {"status": "sent", "type": req.type, "to": req.email, "result": result}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"メール送信に失敗しました: {str(e)}")
+
+
+@app.get("/test-email/preview/{email_type}", response_class=HTMLResponse)
+async def test_email_preview(email_type: str):
+    """テスト用：メールのHTMLをブラウザでプレビューする"""
+    templates = {
+        "welcome": welcome_email,
+        "upgrade": upgrade_email,
+        "payment_success": payment_success_email,
+        "supabase_confirm": None,
+    }
+    if email_type not in templates:
+        raise HTTPException(
+            status_code=422,
+            detail=f"typeは {', '.join(templates.keys())} のいずれかを指定してください。"
+        )
+    if email_type == "supabase_confirm":
+        return HTMLResponse(content=SUPABASE_CONFIRM_TEMPLATE.replace("{{ .ConfirmationURL }}", "#"))
+    _, html = templates[email_type]("test@example.com")
+    return HTMLResponse(content=html)
