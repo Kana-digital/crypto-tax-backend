@@ -542,6 +542,41 @@ async def stripe_webhook(request: Request):
     return {"received": True}
 
 
+@app.post("/cancel-subscription")
+async def cancel_subscription(user: AuthUser = Depends(get_current_user)):
+    """認証必須: 有料プランを解約する（Stripeサブスクリプションをキャンセル）"""
+    if not stripe.api_key:
+        raise HTTPException(status_code=503, detail="決済機能が設定されていません。")
+    if not supabase:
+        raise HTTPException(status_code=503, detail="データベースが設定されていません。")
+
+    # ユーザーのstripe_customer_idを取得
+    res = supabase.table("user_profiles").select("stripe_customer_id, is_paid").eq("id", user.id).single().execute()
+    if not res.data or not res.data.get("stripe_customer_id"):
+        raise HTTPException(status_code=404, detail="決済情報が見つかりません。")
+    if not res.data.get("is_paid"):
+        raise HTTPException(status_code=400, detail="現在有料プランに加入していません。")
+
+    customer_id = res.data["stripe_customer_id"]
+
+    try:
+        # Stripeからアクティブなサブスクリプションを取得
+        subscriptions = stripe.Subscription.list(customer=customer_id, status="active", limit=1)
+        if not subscriptions.data:
+            raise HTTPException(status_code=404, detail="アクティブなサブスクリプションが見つかりません。")
+
+        # サブスクリプションを期間終了時にキャンセル（即時ではなく期間終了まで利用可能）
+        stripe.Subscription.modify(
+            subscriptions.data[0].id,
+            cancel_at_period_end=True,
+        )
+
+        return {"message": "解約を受け付けました。有効期限まで引き続きご利用いただけます。"}
+
+    except stripe.StripeError as e:
+        raise HTTPException(status_code=500, detail=f"解約処理に失敗しました: {str(e)}")
+
+
 # ==================== メールテスト ====================
 
 class TestEmailRequest(BaseModel):
