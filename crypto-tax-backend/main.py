@@ -663,7 +663,7 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
         )
         print(f"[Webhook] checkout完了: user_id={user_id}, email={customer_email}")
 
-        if user_id and supabase:
+        if user_id and supabase_admin:
             from datetime import datetime, timedelta, timezone
             paid_until = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
             upsert_data = {
@@ -673,7 +673,7 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
             }
             if customer_id:
                 upsert_data["stripe_customer_id"] = customer_id
-            supabase.table("user_profiles").upsert(upsert_data).execute()
+            supabase_admin.table("user_profiles").upsert(upsert_data).execute()
             print(f"[Webhook] user_profiles更新成功: {user_id}")
 
             # メール送信はバックグラウンドで実行（Stripeへのレスポンスを遅延させない）
