@@ -655,9 +655,12 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
 
     if event_type == "checkout.session.completed":
         session = event["data"]["object"]
-        user_id = session.get("client_reference_id")
-        customer_id = session.get("customer")
-        customer_email = session.get("customer_email") or session.get("customer_details", {}).get("email")
+        # Stripe StripeObject は .get() を持たないため属性アクセスを使用
+        user_id = session.client_reference_id
+        customer_id = session.customer
+        customer_email = session.customer_email or (
+            session.customer_details.email if session.customer_details else None
+        )
         print(f"[Webhook] checkout完了: user_id={user_id}, email={customer_email}")
 
         if user_id and supabase:
