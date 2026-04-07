@@ -454,6 +454,54 @@ async def chat(request: ChatRequest):
         raise HTTPException(status_code=500, detail="AIサポートへの接続に失敗しました。しばらく待ってから再度お試しください。")
 
 
+class EscalateRequest(BaseModel):
+    messages: List[ChatMessage]
+    user_email: Optional[str] = None
+    category: str = "bug"
+
+ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "9kana6@gmail.com")
+
+@app.post("/escalate")
+async def escalate_to_admin(request: EscalateRequest):
+    """チャットで解決できない問題を管理者にエスカレーション（DB保存＋メール通知）"""
+    chat_log = [{"role": m.role, "content": m.content} for m in request.messages]
+
+    # 1. Supabase に保存
+    ticket_id = None
+    if supabase_admin:
+        try:
+            import json
+            res = supabase_admin.table("support_tickets").insert({
+                "user_email": request.user_email,
+                "category": request.category,
+                "chat_log": json.dumps(chat_log, ensure_ascii=False),
+                "status": "open",
+            }).execute()
+            if res.data:
+                ticket_id = res.data[0].get("id")
+        except Exception as e:
+            print(f"[Escalate] DB保存失敗: {e}")
+
+    # 2. 管理者にメール通知
+    try:
+        chat_text = "\n".join([f"{'👤 ユーザー' if m.role == 'user' else '🤖 AI'}: {m.content}" for m in request.messages])
+        subject = f"【サポート】{request.category} - {request.user_email or '匿名'}"
+        html = f"""<!DOCTYPE html><html><head><meta charset="utf-8"></head><body style="font-family:sans-serif;padding:20px;">
+<h2>サポートチケット</h2>
+<p><strong>カテゴリ:</strong> {request.category}</p>
+<p><strong>ユーザー:</strong> {request.user_email or '未ログイン'}</p>
+{f'<p><strong>チケットID:</strong> {ticket_id}</p>' if ticket_id else ''}
+<hr>
+<h3>チャット履歴</h3>
+<pre style="background:#f5f5f5;padding:16px;border-radius:8px;white-space:pre-wrap;">{chat_text}</pre>
+</body></html>"""
+        await send_email(ADMIN_EMAIL, subject, html)
+    except Exception as e:
+        print(f"[Escalate] メール送信失敗: {e}")
+
+    return {"message": "開発者に報告しました。ご連絡ありがとうございます。", "ticket_id": ticket_id}
+
+
 # ==================== Exchange Requests ====================
 @app.post("/request-exchange")
 async def request_exchange(
