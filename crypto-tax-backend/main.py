@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse
 from auth import get_current_user, get_optional_user, AuthUser
 from parsers import coincheck, sbivc, bitbank, binance, exported
 from email_service import send_email
-from email_templates import welcome_email, upgrade_email, payment_success_email, SUPABASE_CONFIRM_TEMPLATE
+from email_templates import welcome_email, upgrade_email, payment_success_email, registration_email, SUPABASE_CONFIRM_TEMPLATE
 from calculators import total_average, moving_average
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -32,7 +32,9 @@ anthropic_client = Anthropic()  # ANTHROPIC_API_KEY 環境変数を自動参照
 # Supabase クライアント
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
 SUPABASE_ANON_KEY = os.environ.get("SUPABASE_ANON_KEY", "")
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_ANON_KEY) if SUPABASE_URL and SUPABASE_ANON_KEY else None
+supabase_admin: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY) if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY else None
 
 # Stripe 設定
 stripe.api_key = os.environ.get("STRIPE_SECRET_KEY", "")
@@ -179,6 +181,95 @@ def generate_pdf(results: list, total_profit: float, method_label: str) -> bytes
 @app.get("/")
 def read_root():
     return {"message": "crypto-tax-backend 起動中！"}
+
+
+# ==================== 新規登録 ====================
+
+class RegisterRequest(BaseModel):
+    email: str
+
+@app.post("/register")
+async def register_user(req: RegisterRequest):
+    """メールアドレスで新規登録 → 確認メール（決済リンク＋パスワード設定リンク）を送信"""
+    import re, uuid
+    email = req.email.strip().lower()
+    if not email or not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        raise HTTPException(status_code=422, detail="正しいメールアドレスを入力してください。")
+
+    if not supabase_admin:
+        raise HTTPException(status_code=503, detail="サービスが設定されていません。")
+
+    # 1. Supabase Admin API でユーザー作成
+    temp_password = uuid.uuid4().hex[:16] + "Aa1!"
+    try:
+        user_res = supabase_admin.auth.admin.create_user({
+            "email": email,
+            "password": temp_password,
+            "email_confirm": True,  # メール確認済みとして作成
+        })
+        user_id = user_res.user.id
+    except Exception as e:
+        error_msg = str(e)
+        if "already" in error_msg.lower() or "duplicate" in error_msg.lower():
+            raise HTTPException(status_code=409, detail="このメールアドレスは既に登録されています。ログインしてください。")
+        raise HTTPException(status_code=500, detail=f"ユーザー作成に失敗しました: {error_msg}")
+
+    # 2. Stripe Checkout セッションを作成
+    checkout_url = None
+    try:
+        session = stripe.checkout.Session.create(
+            payment_method_types=["card"],
+            line_items=[{
+                "price_data": {
+                    "currency": "jpy",
+                    "product_data": {
+                        "name": "暗号資産損益計算ツール 年間プラン",
+                        "description": "広告非表示・CSV/PDF出力機能（1年間有効）",
+                    },
+                    "unit_amount": 980,
+                },
+                "quantity": 1,
+            }],
+            mode="payment",
+            customer_email=email,
+            client_reference_id=str(user_id),
+            billing_address_collection="required",
+            success_url=f"{FRONTEND_URL}?payment=success",
+            cancel_url=f"{FRONTEND_URL}?payment=cancel",
+        )
+        checkout_url = session.url
+    except Exception as e:
+        print(f"[Register] Stripe session作成失敗: {e}")
+
+    # 3. Supabase Admin API でパスワードリセットリンクを生成（メール送信なし）
+    password_reset_url = None
+    try:
+        link_res = supabase_admin.auth.admin.generate_link({
+            "type": "recovery",
+            "email": email,
+            "options": {"redirect_to": FRONTEND_URL},
+        })
+        # generate_link は action_link プロパティでリンクを返す
+        if hasattr(link_res, 'properties') and hasattr(link_res.properties, 'action_link'):
+            password_reset_url = link_res.properties.action_link
+        elif hasattr(link_res, 'action_link'):
+            password_reset_url = link_res.action_link
+        else:
+            print(f"[Register] generate_link response: {link_res}")
+    except Exception as e:
+        print(f"[Register] パスワードリセットリンク生成失敗: {e}")
+
+    # 4. Resend API で確認メールを送信
+    try:
+        subject, html = registration_email(email, checkout_url, password_reset_url)
+        await send_email(email, subject, html)
+        print(f"[Register] 登録確認メール送信成功: {email}")
+    except Exception as e:
+        print(f"[Register] メール送信失敗: {e}")
+        # メール送信失敗でもユーザー作成は完了しているので200を返す
+        return {"message": "登録は完了しましたが、メール送信に失敗しました。サポートにお問い合わせください。", "email_sent": False}
+
+    return {"message": "登録確認メールを送信しました。メールをご確認ください。", "email_sent": True}
 
 
 # ==================== Auth ====================
