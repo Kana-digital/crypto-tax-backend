@@ -523,10 +523,11 @@ async def stripe_webhook(request: Request):
             if customer_email:
                 try:
                     subject, html = payment_success_email(customer_email)
-                    import asyncio
-                    asyncio.ensure_future(send_email(customer_email, subject, html))
-                except Exception:
-                    pass  # メール送信失敗は決済処理をブロックしない
+                    await send_email(customer_email, subject, html)
+                    print(f"[Webhook] 決済完了メール送信成功: {customer_email}")
+                except Exception as e:
+                    print(f"[Webhook] 決済完了メール送信失敗: {customer_email} - {e}")
+                    # メール送信失敗は決済処理をブロックしない
 
     # 一括払いのため、サブスクリプション関連イベントは不要
     # 有効期限（paid_until）で自動的に無料プランに戻る

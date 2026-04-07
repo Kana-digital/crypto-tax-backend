@@ -4,7 +4,7 @@
 Resend API を使用してトランザクションメールを送信する。
 環境変数:
   RESEND_API_KEY  - Resend の API キー（https://resend.com で取得）
-  EMAIL_FROM      - 送信元メールアドレス（デフォルト: onboarding@resend.dev）
+  EMAIL_FROM      - 送信元メールアドレス（デフォルト: noreply@crypto-zei.jp）
   FRONTEND_URL    - フロントエンドURL（メール内リンク用）
 """
 
@@ -12,7 +12,7 @@ import os
 import httpx
 
 RESEND_API_KEY = os.environ.get("RESEND_API_KEY", "")
-EMAIL_FROM = os.environ.get("EMAIL_FROM", "暗号資産損益計算ツール <onboarding@resend.dev>")
+EMAIL_FROM = os.environ.get("EMAIL_FROM", "暗号資産損益計算ツール <noreply@crypto-zei.jp>")
 FRONTEND_URL = os.environ.get("FRONTEND_URL", "https://crypto-tax-frontend.vercel.app")
 
 

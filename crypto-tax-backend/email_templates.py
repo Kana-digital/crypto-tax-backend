@@ -121,7 +121,7 @@ def upgrade_email(user_email: str) -> tuple[str, str]:
       </div>
       <div style="text-align: center; margin-bottom: 16px;">
         <span class="price">980</span><span class="price-unit">円 / 年</span>
-        <p style="margin: 4px 0 0; font-size: 12px; color: #92400e;">月あたりわずか約82円</p>
+        <p style="margin: 4px 0 0; font-size: 12px; color: #92400e;">一括払い（1年間有効）</p>
       </div>
 
       <ul class="feature-list">
@@ -227,8 +227,8 @@ def payment_success_email(user_email: str) -> tuple[str, str]:
           <td style="padding: 4px 0; text-align: right; color: #0f172a;">クレジットカード（Stripe）</td>
         </tr>
         <tr>
-          <td style="padding: 4px 0; color: #64748b;">次回更新</td>
-          <td style="padding: 4px 0; text-align: right; color: #0f172a;">1年後に自動更新</td>
+          <td style="padding: 4px 0; color: #64748b;">有効期限</td>
+          <td style="padding: 4px 0; text-align: right; color: #0f172a;">購入日から1年間</td>
         </tr>
       </table>
     </div>
