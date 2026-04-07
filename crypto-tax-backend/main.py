@@ -313,7 +313,7 @@ async def get_me(user: AuthUser = Depends(get_current_user)):
     result = {"id": user.id, "email": user.email, "role": user.role}
     if supabase:
         try:
-            profile = supabase.table("user_profiles").select("is_paid,paid_until").eq("id", user.id).single().execute()
+            profile = supabase_admin.table("user_profiles").select("is_paid,paid_until").eq("id", user.id).single().execute()
             if profile.data:
                 result["is_paid"] = profile.data.get("is_paid", False)
                 result["paid_until"] = profile.data.get("paid_until")
@@ -324,11 +324,11 @@ async def get_me(user: AuthUser = Depends(get_current_user)):
 
 def _is_user_paid(user: Optional[AuthUser]) -> bool:
     """ユーザーが有料プランかどうかを判定する"""
-    if not user or not supabase:
+    if not user or not supabase_admin:
         return False
     try:
         from datetime import datetime, timezone
-        profile = supabase.table("user_profiles").select("is_paid,paid_until").eq("id", user.id).single().execute()
+        profile = supabase_admin.table("user_profiles").select("is_paid,paid_until").eq("id", user.id).single().execute()
         if profile.data and profile.data.get("is_paid"):
             paid_until = profile.data.get("paid_until")
             if paid_until:
@@ -693,12 +693,12 @@ async def cancel_subscription(user: AuthUser = Depends(get_current_user)):
         raise HTTPException(status_code=503, detail="データベースが設定されていません。")
 
     # ユーザーの有料ステータスを確認
-    res = supabase.table("user_profiles").select("is_paid").eq("id", user.id).single().execute()
+    res = supabase_admin.table("user_profiles").select("is_paid").eq("id", user.id).single().execute()
     if not res.data or not res.data.get("is_paid"):
         raise HTTPException(status_code=400, detail="現在有料プランに加入していません。")
 
     try:
-        supabase.table("user_profiles").update({
+        supabase_admin.table("user_profiles").update({
             "is_paid": False,
         }).eq("id", user.id).execute()
 
