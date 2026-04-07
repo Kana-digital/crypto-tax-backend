@@ -27,7 +27,8 @@ from fastapi import Request
 
 app = FastAPI()
 
-anthropic_client = Anthropic()  # ANTHROPIC_API_KEY 環境変数を自動参照
+ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
+anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
 
 # Supabase クライアント
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -442,6 +443,9 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
+    if not anthropic_client:
+        print("[Chat] ANTHROPIC_API_KEY is not set")
+        raise HTTPException(status_code=500, detail="AIサポートは現在準備中です。ANTHROPIC_API_KEY が未設定です。")
     try:
         response = anthropic_client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -452,7 +456,7 @@ async def chat(request: ChatRequest):
         return {"reply": response.content[0].text}
     except Exception as e:
         print(f"[Chat] Error: {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail=f"AIサポートへの接続に失敗しました: {type(e).__name__}")
+        raise HTTPException(status_code=500, detail=f"AIサポートへの接続に失敗しました: {type(e).__name__}: {e}")
 
 
 class EscalateRequest(BaseModel):
