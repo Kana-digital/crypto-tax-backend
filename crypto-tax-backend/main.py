@@ -451,7 +451,8 @@ async def chat(request: ChatRequest):
         )
         return {"reply": response.content[0].text}
     except Exception as e:
-        raise HTTPException(status_code=500, detail="AIサポートへの接続に失敗しました。しばらく待ってから再度お試しください。")
+        print(f"[Chat] Error: {type(e).__name__}: {e}")
+        raise HTTPException(status_code=500, detail=f"AIサポートへの接続に失敗しました: {type(e).__name__}")
 
 
 class EscalateRequest(BaseModel):
