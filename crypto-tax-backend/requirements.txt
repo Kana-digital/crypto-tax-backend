@@ -8,3 +8,4 @@ supabase
 stripe
 PyJWT[crypto]>=2.0
 httpx
+slowapi

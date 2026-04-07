@@ -2,13 +2,13 @@ import shutil
 import tempfile
 import os
 import io
+import csv
 from anthropic import Anthropic
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks, Request
 from pydantic import BaseModel
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
-from fastapi.responses import HTMLResponse
+from fastapi.responses import StreamingResponse, HTMLResponse
 from auth import get_current_user, get_optional_user, AuthUser
 from parsers import coincheck, sbivc, bitbank, binance, exported
 from email_service import send_email
@@ -23,13 +23,18 @@ from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.cidfonts import UnicodeCIDFont
 from supabase import create_client, Client
 import stripe
-from fastapi import Request
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address
+from slowapi.errors import RateLimitExceeded
 
+# レート制限 (A-4)
+limiter = Limiter(key_func=get_remote_address)
 app = FastAPI()
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
-print(f"[Startup] ANTHROPIC_API_KEY set: {bool(ANTHROPIC_API_KEY)}, client initialized: {anthropic_client is not None}", flush=True)
 
 # Supabase クライアント
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -326,7 +331,8 @@ class RegisterRequest(BaseModel):
     email: str
 
 @app.post("/register")
-async def register_user(req: RegisterRequest):
+@limiter.limit("5/minute")
+async def register_user(req: RegisterRequest, request: Request):
     """メールアドレスで新規登録 → 確認メール（決済リンク＋パスワード設定リンク）を送信"""
     import re, uuid
     email = req.email.strip().lower()
@@ -397,7 +403,8 @@ class ForgotPasswordRequest(BaseModel):
     email: str
 
 @app.post("/forgot-password")
-async def forgot_password(req: ForgotPasswordRequest):
+@limiter.limit("5/minute")
+async def forgot_password(req: ForgotPasswordRequest, request: Request):
     """パスワードリセットメールをResend経由で送信"""
     import re
     email = req.email.strip().lower()
@@ -478,7 +485,9 @@ def _is_user_paid(user: Optional[AuthUser]) -> bool:
 
 
 @app.post("/calculate")
+@limiter.limit("20/minute")
 async def calculate(
+    request: Request,
     files: List[UploadFile] = File(...),
     method: str = Form(...),
     user: Optional[AuthUser] = Depends(get_optional_user),
@@ -522,7 +531,9 @@ async def calculate(
 
 
 @app.post("/calculate/pdf")
+@limiter.limit("10/minute")
 async def calculate_pdf(
+    request: Request,
     files: List[UploadFile] = File(...),
     method: str = Form(...),
     user: AuthUser = Depends(get_current_user),
@@ -569,6 +580,69 @@ async def calculate_pdf(
     )
 
 
+# ==================== CSVエクスポート（プレミアム限定） ====================
+
+@app.post("/calculate/csv")
+@limiter.limit("10/minute")
+async def calculate_csv_export(
+    request: Request,
+    files: List[UploadFile] = File(...),
+    method: str = Form(...),
+    user: AuthUser = Depends(get_current_user),
+):
+    """認証必須・プレミアム限定: 計算結果をCSVでエクスポート"""
+    if not _is_user_paid(user):
+        raise HTTPException(
+            status_code=403,
+            detail="CSVエクスポートは有料プラン（年間980円）の機能です。アップグレードしてご利用ください。"
+        )
+
+    all_trades = []
+    for file in files:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".csv") as tmp:
+            shutil.copyfileobj(file.file, tmp)
+            tmp_path = tmp.name
+        try:
+            trades = parse_trades(tmp_path)
+        except ValueError as e:
+            os.unlink(tmp_path)
+            raise HTTPException(status_code=422, detail=f"{file.filename}：{str(e)}")
+        finally:
+            if os.path.exists(tmp_path):
+                os.unlink(tmp_path)
+        if trades is None:
+            raise HTTPException(status_code=422, detail=f"{file.filename}：対応している取引所のCSVとして認識できませんでした。")
+        all_trades.extend(trades)
+
+    all_trades.sort(key=lambda t: str(t["datetime"]))
+    results = run_calculator(all_trades, method)
+    if results is None:
+        raise HTTPException(status_code=422, detail="未対応の計算方法です。")
+
+    # CSV生成
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["取引所", "日時", "通貨", "数量", "売却単価(円)", "取得単価(円)", "損益(円)", "計算方法"])
+    for r in results:
+        writer.writerow([
+            r.get("exchange", "-"),
+            str(r["datetime"])[:16] if r["datetime"] else "-",
+            r.get("currency", "-"),
+            f'{r["amount"]:.6f}',
+            f'{r["sell_price"]:.0f}',
+            f'{r["avg_buy_price"]:.0f}',
+            f'{r["profit"]:.0f}',
+            r.get("method", "-"),
+        ])
+
+    csv_bytes = output.getvalue().encode("utf-8-sig")  # BOM付きUTF-8（Excel対応）
+    return StreamingResponse(
+        io.BytesIO(csv_bytes),
+        media_type="text/csv",
+        headers={"Content-Disposition": "attachment; filename=crypto_tax_export.csv"},
+    )
+
+
 # ==================== Chat Support ====================
 class ChatMessage(BaseModel):
     role: str  # "user" or "assistant"
@@ -578,13 +652,12 @@ class ChatRequest(BaseModel):
     messages: List[ChatMessage]
 
 @app.post("/chat")
-async def chat(request: ChatRequest):
-    # ユーザーの最新メッセージを取得
+@limiter.limit("30/minute")
+async def chat(request: ChatRequest, req: Request, user: Optional[AuthUser] = Depends(get_optional_user)):
+    """チャットサポート（認証任意、レート制限あり）"""
     user_messages = [m for m in request.messages if m.role == "user"]
     latest_user_msg = user_messages[-1].content if user_messages else ""
 
-    # Anthropic API で応答を試みる
-    print(f"[Chat] anthropic_client initialized: {anthropic_client is not None}", flush=True)
     if anthropic_client:
         try:
             response = anthropic_client.messages.create(
@@ -593,16 +666,10 @@ async def chat(request: ChatRequest):
                 system=CHAT_SYSTEM_PROMPT,
                 messages=[{"role": m.role, "content": m.content} for m in request.messages],
             )
-            print(f"[Chat] AI response OK", flush=True)
             return {"reply": response.content[0].text}
         except Exception as e:
-            import traceback
-            print(f"[Chat] Anthropic API error: {type(e).__name__}: {e}", flush=True)
-            traceback.print_exc()
-    else:
-        print("[Chat] ANTHROPIC_API_KEY is not set, using FAQ fallback", flush=True)
+            print(f"[Chat] API error: {type(e).__name__}: {e}", flush=True)
 
-    # フォールバック: キーワードベースのFAQ応答
     reply = faq_fallback(latest_user_msg)
     return {"reply": reply}
 
@@ -615,8 +682,12 @@ class EscalateRequest(BaseModel):
 ADMIN_EMAIL = os.environ.get("ADMIN_EMAIL", "9kana6@gmail.com")
 
 @app.post("/escalate")
-async def escalate_to_admin(request: EscalateRequest):
+@limiter.limit("5/minute")
+async def escalate_to_admin(request: EscalateRequest, req: Request, user: Optional[AuthUser] = Depends(get_optional_user)):
     """チャットで解決できない問題を管理者にエスカレーション（DB保存＋メール通知）"""
+    # 認証済みユーザーのメールを優先使用
+    if user and user.email and not request.user_email:
+        request.user_email = user.email
     chat_log = [{"role": m.role, "content": m.content} for m in request.messages]
 
     # 1. Supabase に保存
@@ -881,8 +952,45 @@ async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
             if customer_email:
                 background_tasks.add_task(_send_payment_email, customer_email)
 
-    # 一括払いのため、サブスクリプション関連イベントは不要
-    # 有効期限（paid_until）で自動的に無料プランに戻る
+    elif event_type == "charge.refunded":
+        # 返金処理: プランを無効化
+        charge = event["data"]["object"]
+        customer_email = charge.get("receipt_email") or charge.get("billing_details", {}).get("email")
+        print(f"[Webhook] 返金処理: email={customer_email}")
+        if customer_email and supabase_admin:
+            try:
+                # メールアドレスからユーザーを検索してプランを無効化
+                users = supabase_admin.auth.admin.list_users()
+                for u in users:
+                    if u.email == customer_email:
+                        supabase_admin.table("user_profiles").update({
+                            "is_paid": False,
+                        }).eq("id", u.id).execute()
+                        print(f"[Webhook] 返金によるプラン無効化: {u.id}")
+                        break
+            except Exception as e:
+                print(f"[Webhook] 返金処理エラー: {e}")
+
+    elif event_type == "charge.dispute.created":
+        # チャージバック（紛争）: プランを即時無効化
+        dispute = event["data"]["object"]
+        charge_id = dispute.get("charge")
+        print(f"[Webhook] チャージバック: charge_id={charge_id}")
+        if charge_id and supabase_admin:
+            try:
+                charge = stripe.Charge.retrieve(charge_id)
+                customer_email = charge.get("receipt_email") or charge.get("billing_details", {}).get("email")
+                if customer_email:
+                    users = supabase_admin.auth.admin.list_users()
+                    for u in users:
+                        if u.email == customer_email:
+                            supabase_admin.table("user_profiles").update({
+                                "is_paid": False,
+                            }).eq("id", u.id).execute()
+                            print(f"[Webhook] チャージバックによるプラン無効化: {u.id}")
+                            break
+            except Exception as e:
+                print(f"[Webhook] チャージバック処理エラー: {e}")
 
     return {"received": True}
 
@@ -916,8 +1024,8 @@ class TestEmailRequest(BaseModel):
     type: str  # "welcome" | "upgrade" | "payment_success"
 
 @app.post("/test-email/send")
-async def test_email_send(req: TestEmailRequest):
-    """テスト用：指定したメールアドレスにテストメールを送信する"""
+async def test_email_send(req: TestEmailRequest, user: AuthUser = Depends(get_current_user)):
+    """テスト用（認証必須）：指定したメールアドレスにテストメールを送信する"""
     templates = {
         "welcome": welcome_email,
         "upgrade": upgrade_email,
