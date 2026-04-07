@@ -65,6 +65,32 @@ CHAT_SYSTEM_PROMPT = """あなたは「暗号資産損益計算ツール」の�
 不具合の報告を受けた場合は、「ご報告ありがとうございます。開発者に共有し改善いたします」と伝えてください。
 回答は3〜5文程度でコンパクトにまとめてください。"""
 
+# FAQフォールバック（Anthropic API 使用不可時）
+FAQ_RESPONSES = {
+    "対応取引所": "現在対応している取引所は Coincheck・SBI VC Trade・bitbank の3つです。今後対応取引所を拡大予定です。",
+    "取引所": "現在対応している取引所は Coincheck・SBI VC Trade・bitbank の3つです。",
+    "csv": "各取引所のマイページ→取引履歴→CSV出力からダウンロードできます。ダウンロードしたCSVファイルをそのままアップロードしてください。",
+    "計算方法": "「総平均法」と「移動平均法」の2つに対応しています。お好みの方法を選択してください。",
+    "料金": "無料プランではCSV取り込み・損益計算が利用可能です。プレミアムプラン（年間980円）では広告非表示＋PDF出力が可能になります。",
+    "プレミアム": "プレミアムプラン（年間980円）では広告非表示＋取引履歴のPDF出力が可能になります。設定画面からアップグレードできます。",
+    "pdf": "PDF出力はプレミアムプラン限定の機能です。設定画面からプレミアムプランにアップグレードすると利用できます。",
+    "確定申告": "計算結果はあくまで参考値です。確定申告の際は税理士への相談を推奨します。",
+    "セキュリティ": "アップロードしたCSVはサーバーに保存されず、計算後即座に削除されます。安心してご利用ください。",
+    "不具合": "ご報告ありがとうございます。開発者に共有し改善いたします。詳しい状況を教えていただけると助かります。",
+    "バグ": "ご報告ありがとうございます。開発者に共有し改善いたします。詳しい状況を教えていただけると助かります。",
+    "エラー": "ご不便おかけして申し訳ございません。どのような操作でエラーが発生したか教えていただけますか？開発者に共有いたします。",
+    "解約": "設定画面の「解約」ボタンから解約できます。解約後も有料期間の終了まではプレミアム機能をご利用いただけます。",
+}
+FAQ_DEFAULT = "お問い合わせありがとうございます。こちらはサポートチャットです。対応取引所・料金プラン・CSV取り込み方法など、お気軽にご質問ください。解決しない場合は「開発者に連絡」ボタンをご利用ください。"
+
+def faq_fallback(user_message: str) -> str:
+    """キーワードマッチングによる簡易FAQ応答"""
+    msg_lower = user_message.lower()
+    for keyword, response in FAQ_RESPONSES.items():
+        if keyword.lower() in msg_lower:
+            return response
+    return FAQ_DEFAULT
+
 app.add_middleware(
     CORSMiddleware,
     allow_origin_regex=r"(http://localhost:\d+|https://.*\.vercel\.app|https://.*\.onrender\.com)",
@@ -443,20 +469,28 @@ class ChatRequest(BaseModel):
 
 @app.post("/chat")
 async def chat(request: ChatRequest):
-    if not anthropic_client:
-        print("[Chat] ANTHROPIC_API_KEY is not set")
-        raise HTTPException(status_code=500, detail="AIサポートは現在準備中です。ANTHROPIC_API_KEY が未設定です。")
-    try:
-        response = anthropic_client.messages.create(
-            model="claude-haiku-4-5-20251001",
-            max_tokens=1024,
-            system=CHAT_SYSTEM_PROMPT,
-            messages=[{"role": m.role, "content": m.content} for m in request.messages],
-        )
-        return {"reply": response.content[0].text}
-    except Exception as e:
-        print(f"[Chat] Error: {type(e).__name__}: {e}")
-        raise HTTPException(status_code=500, detail=f"AIサポートへの接続に失敗しました: {type(e).__name__}: {e}")
+    # ユーザーの最新メッセージを取得
+    user_messages = [m for m in request.messages if m.role == "user"]
+    latest_user_msg = user_messages[-1].content if user_messages else ""
+
+    # Anthropic API で応答を試みる
+    if anthropic_client:
+        try:
+            response = anthropic_client.messages.create(
+                model="claude-haiku-4-5-20251001",
+                max_tokens=1024,
+                system=CHAT_SYSTEM_PROMPT,
+                messages=[{"role": m.role, "content": m.content} for m in request.messages],
+            )
+            return {"reply": response.content[0].text}
+        except Exception as e:
+            print(f"[Chat] Anthropic API error: {type(e).__name__}: {e}")
+    else:
+        print("[Chat] ANTHROPIC_API_KEY is not set, using FAQ fallback")
+
+    # フォールバック: キーワードベースのFAQ応答
+    reply = faq_fallback(latest_user_msg)
+    return {"reply": reply}
 
 
 class EscalateRequest(BaseModel):
