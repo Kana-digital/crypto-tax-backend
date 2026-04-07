@@ -3,7 +3,7 @@ import tempfile
 import os
 import io
 from anthropic import Anthropic
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, Depends, BackgroundTasks
 from pydantic import BaseModel
 from typing import List, Optional
 from fastapi.middleware.cors import CORSMiddleware
@@ -241,27 +241,9 @@ async def register_user(req: RegisterRequest):
     except Exception as e:
         print(f"[Register] Stripe session作成失敗: {e}")
 
-    # 3. Supabase Admin API でパスワードリセットリンクを生成（メール送信なし）
-    password_reset_url = None
+    # 3. Resend API で申し込み受付メールを送信（パスワード設定は決済完了後に案内）
     try:
-        link_res = supabase_admin.auth.admin.generate_link({
-            "type": "recovery",
-            "email": email,
-            "options": {"redirect_to": FRONTEND_URL},
-        })
-        # generate_link は action_link プロパティでリンクを返す
-        if hasattr(link_res, 'properties') and hasattr(link_res.properties, 'action_link'):
-            password_reset_url = link_res.properties.action_link
-        elif hasattr(link_res, 'action_link'):
-            password_reset_url = link_res.action_link
-        else:
-            print(f"[Register] generate_link response: {link_res}")
-    except Exception as e:
-        print(f"[Register] パスワードリセットリンク生成失敗: {e}")
-
-    # 4. Resend API で確認メールを送信
-    try:
-        subject, html = registration_email(email, checkout_url, password_reset_url)
+        subject, html = registration_email(email, checkout_url)
         await send_email(email, subject, html)
         print(f"[Register] 登録確認メール送信成功: {email}")
     except Exception as e:
@@ -622,8 +604,34 @@ async def create_checkout_session(user: AuthUser = Depends(get_current_user)):
         raise HTTPException(status_code=500, detail=f"決済セッションの作成に失敗しました: {str(e)}")
 
 
+async def _send_payment_email(customer_email: str):
+    """決済完了メール送信（バックグラウンドタスク用）"""
+    password_reset_url = None
+    if supabase_admin:
+        try:
+            link_res = supabase_admin.auth.admin.generate_link({
+                "type": "recovery",
+                "email": customer_email,
+                "options": {"redirect_to": FRONTEND_URL},
+            })
+            if hasattr(link_res, 'properties') and hasattr(link_res.properties, 'action_link'):
+                password_reset_url = link_res.properties.action_link
+            elif hasattr(link_res, 'action_link'):
+                password_reset_url = link_res.action_link
+            print(f"[Webhook] パスワードリセットリンク生成成功: {customer_email}")
+        except Exception as e:
+            print(f"[Webhook] パスワードリセットリンク生成失敗: {customer_email} - {e}")
+
+    try:
+        subject, html = payment_success_email(customer_email, password_reset_url)
+        await send_email(customer_email, subject, html)
+        print(f"[Webhook] 決済完了メール送信成功: {customer_email}")
+    except Exception as e:
+        print(f"[Webhook] 決済完了メール送信失敗: {customer_email} - {e}")
+
+
 @app.post("/stripe-webhook")
-async def stripe_webhook(request: Request):
+async def stripe_webhook(request: Request, background_tasks: BackgroundTasks):
     if not STRIPE_WEBHOOK_SECRET:
         raise HTTPException(status_code=503, detail="Webhook署名シークレットが設定されていません。")
 
@@ -643,12 +651,15 @@ async def stripe_webhook(request: Request):
         raise HTTPException(status_code=400, detail=f"Webhook検証エラー: {str(e)}")
 
     event_type = event["type"]
+    print(f"[Webhook] イベント受信: {event_type}")
 
     if event_type == "checkout.session.completed":
         session = event["data"]["object"]
         user_id = session.get("client_reference_id")
         customer_id = session.get("customer")
         customer_email = session.get("customer_email") or session.get("customer_details", {}).get("email")
+        print(f"[Webhook] checkout完了: user_id={user_id}, email={customer_email}")
+
         if user_id and supabase:
             from datetime import datetime, timedelta, timezone
             paid_until = (datetime.now(timezone.utc) + timedelta(days=365)).isoformat()
@@ -657,20 +668,14 @@ async def stripe_webhook(request: Request):
                 "is_paid": True,
                 "paid_until": paid_until,
             }
-            # Stripe customer IDを保存（解約時の照合用）
             if customer_id:
                 upsert_data["stripe_customer_id"] = customer_id
             supabase.table("user_profiles").upsert(upsert_data).execute()
+            print(f"[Webhook] user_profiles更新成功: {user_id}")
 
-            # 決済完了メールを送信
+            # メール送信はバックグラウンドで実行（Stripeへのレスポンスを遅延させない）
             if customer_email:
-                try:
-                    subject, html = payment_success_email(customer_email)
-                    await send_email(customer_email, subject, html)
-                    print(f"[Webhook] 決済完了メール送信成功: {customer_email}")
-                except Exception as e:
-                    print(f"[Webhook] 決済完了メール送信失敗: {customer_email} - {e}")
-                    # メール送信失敗は決済処理をブロックしない
+                background_tasks.add_task(_send_payment_email, customer_email)
 
     # 一括払いのため、サブスクリプション関連イベントは不要
     # 有効期限（paid_until）で自動的に無料プランに戻る

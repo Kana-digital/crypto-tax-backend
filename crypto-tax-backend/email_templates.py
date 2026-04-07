@@ -183,9 +183,10 @@ def upgrade_email(user_email: str) -> tuple[str, str]:
     return subject, html
 
 
-def registration_email(user_email: str, checkout_url: str | None, password_reset_url: str | None) -> tuple[str, str]:
+def registration_email(user_email: str, checkout_url: str | None) -> tuple[str, str]:
     """
-    新規登録確認メール（決済リンク＋パスワード設定リンク付き）
+    新規登録受付メール（決済リンク付き）
+    ※ この時点ではまだ登録完了ではない。決済後にパスワード設定メールを送る。
     Returns: (subject, html)
     """
     checkout_btn = ""
@@ -195,14 +196,7 @@ def registration_email(user_email: str, checkout_url: str | None, password_reset
       <a href="{checkout_url}" style="display: inline-block; background: linear-gradient(135deg, #f59e0b, #d97706); color: #ffffff !important; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-size: 16px; font-weight: 700;">お支払いに進む（年間980円）</a>
     </div>"""
 
-    password_btn = ""
-    if password_reset_url:
-        password_btn = f"""
-    <div style="text-align: center; margin: 20px 0;">
-      <a href="{password_reset_url}" style="display: inline-block; background: #2563eb; color: #ffffff !important; text-decoration: none; padding: 12px 28px; border-radius: 8px; font-size: 14px; font-weight: 600;">パスワードを設定する</a>
-    </div>"""
-
-    subject = "【暗号資産損益計算ツール】ご登録ありがとうございます - お支払い・パスワード設定のご案内"
+    subject = "【暗号資産損益計算ツール】お申し込みを受け付けました"
     html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8">{_BASE_STYLE}</head>
@@ -210,15 +204,15 @@ def registration_email(user_email: str, checkout_url: str | None, password_reset
 <div class="container">
   <div class="card">
     <div class="logo"><div class="logo-icon">₿</div></div>
-    <h1>ご登録ありがとうございます！</h1>
-    <p>暗号資産損益計算ツールへの登録が完了しました。</p>
-    <p>以下の2つのステップでセットアップを完了してください。</p>
+    <h1>お申し込みありがとうございます</h1>
+    <p>暗号資産損益計算ツールへのお申し込みを受け付けました。</p>
+    <p>以下のボタンからお支払いを完了すると、すぐにご利用いただけます。</p>
 
     <hr class="divider">
 
     <div class="highlight highlight-gold">
       <p style="margin: 0 0 8px; font-weight: 700; color: #92400e; font-size: 16px;">
-        ① プレミアムプランのお支払い
+        プレミアムプランのお支払い
       </p>
       <p style="margin: 0 0 8px; color: #92400e; font-size: 14px;">
         年間 <span class="price">980</span><span class="price-unit">円</span> で広告なし・PDF出力・CSV出力が利用可能に。
@@ -232,18 +226,13 @@ def registration_email(user_email: str, checkout_url: str | None, password_reset
     </div>
 
     <div class="highlight">
-      <p style="margin: 0 0 8px; font-weight: 700; color: #0f172a; font-size: 16px;">
-        ② パスワードの設定
+      <p style="margin: 0; color: #475569; font-size: 13px;">
+        💡 お支払い完了後、パスワード設定用のメールをお送りします。そちらからログイン用のパスワードを設定してください。
       </p>
-      <p style="margin: 0 0 8px; color: #475569; font-size: 14px;">
-        ログイン用のパスワードを設定してください。
-      </p>
-      {password_btn}
     </div>
 
     <hr class="divider">
     <p style="font-size: 12px; color: #94a3b8;">
-      ※ お支払い・パスワード設定はどちらから先に行っても構いません。<br>
       ※ 対応取引所：Coincheck・SBI VC Trade・bitbank
     </p>
   </div>
@@ -299,12 +288,27 @@ def password_reset_email(user_email: str, reset_url: str) -> tuple[str, str]:
     return subject, html
 
 
-def payment_success_email(user_email: str) -> tuple[str, str]:
+def payment_success_email(user_email: str, password_reset_url: str | None = None) -> tuple[str, str]:
     """
-    決済完了・プレミアムプラン開始メール
+    決済完了・プレミアムプラン開始メール（パスワード設定リンク付き）
     Returns: (subject, html)
     """
-    subject = "プレミアムプランへようこそ！ - 暗号資産損益計算ツール"
+    password_section = ""
+    if password_reset_url:
+        password_section = f"""
+    <div class="highlight" style="border: 2px solid #2563eb;">
+      <p style="margin: 0 0 8px; font-weight: 700; color: #0f172a; font-size: 16px;">
+        パスワードを設定してください
+      </p>
+      <p style="margin: 0 0 12px; color: #475569; font-size: 14px;">
+        以下のボタンからログイン用のパスワードを設定すると、すぐにご利用いただけます。
+      </p>
+      <div style="text-align: center;">
+        <a href="{password_reset_url}" style="display: inline-block; background: #2563eb; color: #ffffff !important; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-size: 16px; font-weight: 700;">パスワードを設定する</a>
+      </div>
+    </div>"""
+
+    subject = "【暗号資産損益計算ツール】決済完了 - パスワードを設定してご利用開始"
     html = f"""<!DOCTYPE html>
 <html>
 <head><meta charset="utf-8">{_BASE_STYLE}</head>
@@ -312,9 +316,11 @@ def payment_success_email(user_email: str) -> tuple[str, str]:
 <div class="container">
   <div class="card">
     <div class="logo"><div class="logo-icon">₿</div></div>
-    <h1>🎉 プレミアムプランの<br>ご購入ありがとうございます！</h1>
+    <h1>ご登録ありがとうございます！</h1>
 
-    <p>暗号資産損益計算ツールのプレミアムプランが有効になりました。以下のすべての機能がご利用いただけます。</p>
+    <p>お支払いが完了し、プレミアムプランが有効になりました。</p>
+
+    {password_section}
 
     <div class="highlight highlight-gold">
       <div style="text-align: center; margin-bottom: 8px;">
@@ -347,10 +353,6 @@ def payment_success_email(user_email: str) -> tuple[str, str]:
           <td style="padding: 4px 0; text-align: right; color: #0f172a;">購入日から1年間</td>
         </tr>
       </table>
-    </div>
-
-    <div style="text-align: center;">
-      <a href="{FRONTEND_URL}" class="btn">さっそく使ってみる</a>
     </div>
 
     <hr class="divider">
