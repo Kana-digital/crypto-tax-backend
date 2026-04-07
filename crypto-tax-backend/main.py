@@ -29,6 +29,7 @@ app = FastAPI()
 
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY", "")
 anthropic_client = Anthropic(api_key=ANTHROPIC_API_KEY) if ANTHROPIC_API_KEY else None
+print(f"[Startup] ANTHROPIC_API_KEY set: {bool(ANTHROPIC_API_KEY)}, client initialized: {anthropic_client is not None}", flush=True)
 
 # Supabase クライアント
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "")
@@ -583,6 +584,7 @@ async def chat(request: ChatRequest):
     latest_user_msg = user_messages[-1].content if user_messages else ""
 
     # Anthropic API で応答を試みる
+    print(f"[Chat] anthropic_client initialized: {anthropic_client is not None}", flush=True)
     if anthropic_client:
         try:
             response = anthropic_client.messages.create(
@@ -591,11 +593,14 @@ async def chat(request: ChatRequest):
                 system=CHAT_SYSTEM_PROMPT,
                 messages=[{"role": m.role, "content": m.content} for m in request.messages],
             )
+            print(f"[Chat] AI response OK", flush=True)
             return {"reply": response.content[0].text}
         except Exception as e:
-            print(f"[Chat] Anthropic API error: {type(e).__name__}: {e}")
+            import traceback
+            print(f"[Chat] Anthropic API error: {type(e).__name__}: {e}", flush=True)
+            traceback.print_exc()
     else:
-        print("[Chat] ANTHROPIC_API_KEY is not set, using FAQ fallback")
+        print("[Chat] ANTHROPIC_API_KEY is not set, using FAQ fallback", flush=True)
 
     # フォールバック: キーワードベースのFAQ応答
     reply = faq_fallback(latest_user_msg)
