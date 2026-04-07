@@ -260,6 +260,45 @@ def registration_email(user_email: str, checkout_url: str | None, password_reset
     return subject, html
 
 
+def password_reset_email(user_email: str, reset_url: str) -> tuple[str, str]:
+    """
+    パスワードリセットメール（Resend経由で送信）
+    Returns: (subject, html)
+    """
+    subject = "【暗号資産損益計算ツール】パスワード再設定のご案内"
+    html = f"""<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8">{_BASE_STYLE}</head>
+<body>
+<div class="container">
+  <div class="card">
+    <div class="logo"><div class="logo-icon">₿</div></div>
+    <h1>パスワード再設定</h1>
+    <p>パスワードの再設定リクエストを受け付けました。</p>
+    <p>以下のボタンから新しいパスワードを設定してください。</p>
+
+    <div style="text-align: center; margin: 24px 0;">
+      <a href="{reset_url}" style="display: inline-block; background: #2563eb; color: #ffffff !important; text-decoration: none; padding: 14px 32px; border-radius: 8px; font-size: 16px; font-weight: 700;">パスワードを再設定する</a>
+    </div>
+
+    <hr class="divider">
+    <p style="font-size: 12px; color: #94a3b8;">
+      ※ このリンクの有効期限は24時間です。<br>
+      ※ 心当たりがない場合は、このメールを無視してください。パスワードは変更されません。
+    </p>
+  </div>
+
+  <div class="footer">
+    <p>暗号資産損益計算ツール</p>
+    <p><a href="{FRONTEND_URL}">crypto-tax-frontend.vercel.app</a></p>
+    <p>このメールは {user_email} 宛に送信されています。</p>
+  </div>
+</div>
+</body>
+</html>"""
+    return subject, html
+
+
 def payment_success_email(user_email: str) -> tuple[str, str]:
     """
     決済完了・プレミアムプラン開始メール

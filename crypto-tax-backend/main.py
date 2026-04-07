@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse
 from auth import get_current_user, get_optional_user, AuthUser
 from parsers import coincheck, sbivc, bitbank, binance, exported
 from email_service import send_email
-from email_templates import welcome_email, upgrade_email, payment_success_email, registration_email, SUPABASE_CONFIRM_TEMPLATE
+from email_templates import welcome_email, upgrade_email, payment_success_email, registration_email, password_reset_email, SUPABASE_CONFIRM_TEMPLATE
 from calculators import total_average, moving_average
 from reportlab.lib.pagesizes import A4
 from reportlab.lib import colors
@@ -270,6 +270,58 @@ async def register_user(req: RegisterRequest):
         return {"message": "登録は完了しましたが、メール送信に失敗しました。サポートにお問い合わせください。", "email_sent": False}
 
     return {"message": "登録確認メールを送信しました。メールをご確認ください。", "email_sent": True}
+
+
+# ==================== パスワードリセット ====================
+
+class ForgotPasswordRequest(BaseModel):
+    email: str
+
+@app.post("/forgot-password")
+async def forgot_password(req: ForgotPasswordRequest):
+    """パスワードリセットメールをResend経由で送信"""
+    import re
+    email = req.email.strip().lower()
+    if not email or not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+        raise HTTPException(status_code=422, detail="正しいメールアドレスを入力してください。")
+
+    if not supabase_admin:
+        raise HTTPException(status_code=503, detail="サービスが設定されていません。")
+
+    # Supabase Admin API でパスワードリセットリンクを生成
+    try:
+        link_res = supabase_admin.auth.admin.generate_link({
+            "type": "recovery",
+            "email": email,
+            "options": {"redirect_to": FRONTEND_URL},
+        })
+        reset_url = None
+        if hasattr(link_res, 'properties') and hasattr(link_res.properties, 'action_link'):
+            reset_url = link_res.properties.action_link
+        elif hasattr(link_res, 'action_link'):
+            reset_url = link_res.action_link
+
+        if not reset_url:
+            print(f"[ForgotPassword] generate_link response: {link_res}")
+            # ユーザーが存在しなくても同じレスポンスを返す（セキュリティ）
+            return {"message": "メールアドレスが登録されている場合、リセットメールを送信しました。"}
+
+    except Exception as e:
+        error_msg = str(e)
+        print(f"[ForgotPassword] リンク生成失敗: {error_msg}")
+        # ユーザー未登録でも同じレスポンスを返す（メールアドレスの存在を漏らさない）
+        return {"message": "メールアドレスが登録されている場合、リセットメールを送信しました。"}
+
+    # Resend API でリセットメールを送信
+    try:
+        subject, html = password_reset_email(email, reset_url)
+        await send_email(email, subject, html)
+        print(f"[ForgotPassword] リセットメール送信成功: {email}")
+    except Exception as e:
+        print(f"[ForgotPassword] メール送信失敗: {e}")
+        raise HTTPException(status_code=500, detail="メール送信に失敗しました。しばらく待ってから再度お試しください。")
+
+    return {"message": "メールアドレスが登録されている場合、リセットメールを送信しました。"}
 
 
 # ==================== Auth ====================
